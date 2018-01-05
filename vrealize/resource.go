@@ -18,7 +18,10 @@ type ResourceViewsTemplate struct {
 		ResourceID   string `json:"resourceId"`
 		RequestState string `json:"requestState"`
 		Name         string `json:"name"`
-		Links        []struct {
+		Data         struct {
+			IPAddress string `json:"ip_address"`
+		} `json:"data"`
+		Links []struct {
 			Href string `json:"href"`
 			Rel  string `json:"rel"`
 		} `json:"links"`
@@ -330,6 +333,10 @@ func readResource(d *schema.ResourceData, meta interface{}) error {
 			// set the name only if its a virtual machine
 			if i.ResourceType == "Infrastructure.Virtual" {
 				d.Set("name", i.Name)
+				d.Set("ip_address", i.Data.IPAddress)
+				d.SetConnInfo(map[string]string{
+					"host": i.Data.IPAddress,
+				})
 			}
 		}
 
