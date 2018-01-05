@@ -127,6 +127,11 @@ func setResourceSchema() map[string]*schema.Schema {
 			Computed: true,
 			Optional: true,
 		},
+		"ip_address": {
+			Type:     schema.TypeString,
+			Computed: true,
+			Optional: true,
+		},
 		"resource_type": {
 			Type:     schema.TypeString,
 			Computed: true,
