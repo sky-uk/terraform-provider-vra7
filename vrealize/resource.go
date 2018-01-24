@@ -338,6 +338,10 @@ func createResource(d *schema.ResourceData, meta interface{}) error {
 		//If request is in_progress state during the time then
 		//keep resource details in state files and throw an error
 		//so that the child resource won't go for create call.
+		//If execution gets timed-out and status is in progress
+		//then dependent machine won't be get created in this iteration.
+		//A user needs to ensure that the status should be a success state
+		//using terraform refresh command and hit terraform apply again.
 		return fmt.Errorf("resource is still being created")
 	}
 
