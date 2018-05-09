@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"encoding/json"
+
 	"github.com/hashicorp/terraform/helper/schema"
 )
 
@@ -117,6 +119,11 @@ func setResourceSchema() map[string]*schema.Schema {
 			Computed: true,
 			Optional: true,
 		},
+		"businessgroup_id": {
+			Type:     schema.TypeString,
+			Computed: true,
+			Optional: true,
+		},
 		"wait_timeout": {
 			Type:     schema.TypeInt,
 			Optional: true,
@@ -180,17 +187,35 @@ func setResourceSchema() map[string]*schema.Schema {
 
 //Function use - to create machine
 //Terraform call - terraform apply
-func changeTemplateValue(templateInterface map[string]interface{}, field string, value interface{}) map[string]interface{} {
+func changeTemplateValue(templateInterface map[string]interface{}, field string, value interface{}) (map[string]interface{}, bool) {
+	var replaced bool
 	//Iterate over the map to get field provided as an argument
 	for i := range templateInterface {
 		//If value type is map then set recursive call which will fiend field in one level down of map interface
 		if reflect.ValueOf(templateInterface[i]).Kind() == reflect.Map {
 			template, _ := templateInterface[i].(map[string]interface{})
-			templateInterface[i] = changeTemplateValue(template, field, value)
+			templateInterface[i], replaced = changeTemplateValue(template, field, value)
 		} else if i == field {
 			//If value type is not map then compare field name with provided field name
 			//If both matches then update field value with provided value
 			templateInterface[i] = value
+			return templateInterface, true
+		}
+	}
+	//Return updated map interface type
+	return templateInterface, replaced
+}
+
+//modeled after changeTemplateValue, for values being added to template vs updating existing ones
+func addTemplateValue(templateInterface map[string]interface{}, field string, value interface{}) map[string]interface{} {
+	//simplest case is adding a simple value. Leaving as a func in case there's a need to do more complicated additions later
+	//	templateInterface[data]
+	for i := range templateInterface {
+		if reflect.ValueOf(templateInterface[i]).Kind() == reflect.Map && i == "data" {
+			template, _ := templateInterface[i].(map[string]interface{})
+			templateInterface[i] = addTemplateValue(template, field, value)
+		} else { //if i == "data" {
+			templateInterface[field] = value
 		}
 	}
 	//Return updated map interface type
@@ -243,6 +268,10 @@ func createResource(d *schema.ResourceData, meta interface{}) error {
 	}
 	log.Printf("createResource->templateCatalogItem.Data %v\n", templateCatalogItem.Data)
 
+	if len(d.Get("businessgroup_id").(string)) > 0 {
+		templateCatalogItem.BusinessGroupID = d.Get("businessgroup_id").(string)
+	}
+
 	//Get all resource keys from blueprint in array
 	var keyList []string
 	for field := range templateCatalogItem.Data {
@@ -262,6 +291,10 @@ func createResource(d *schema.ResourceData, meta interface{}) error {
 		}
 	}
 
+	//array to keep track of resource values that have been used
+	usedConfigKeys := []string{}
+	var replaced bool
+
 	//Update template field values with user configuration
 	resourceConfiguration, _ := d.Get("resource_configuration").(map[string]interface{})
 	for configKey := range resourceConfiguration {
@@ -270,16 +303,43 @@ func createResource(d *schema.ResourceData, meta interface{}) error {
 			if strings.Contains(configKey, keyList[dataKey]) {
 				//If user_configuration contains resource_list element
 				// then split user configuration key into resource_name and field_name
-				splitedArray := strings.Split(configKey, keyList[dataKey]+".")
+				splitedArray := strings.SplitN(configKey, keyList[dataKey]+".", 2)
+				if len(splitedArray) != 2 {
+					return fmt.Errorf("resource_configuration key is not in correct format. Expected %s to start with %s\n", configKey, keyList[dataKey]+".")
+				}
 				//Function call which changes the template field values with  user values
-				templateCatalogItem.Data[keyList[dataKey]] = changeTemplateValue(
+				templateCatalogItem.Data[keyList[dataKey]], replaced = changeTemplateValue(
 					templateCatalogItem.Data[keyList[dataKey]].(map[string]interface{}),
 					splitedArray[1],
 					resourceConfiguration[configKey])
+				if replaced {
+					usedConfigKeys = append(usedConfigKeys, configKey)
+				} else {
+					log.Printf("%s was not replaced", configKey)
+				}
 			}
 		}
-		//delete used user configuration
-		delete(resourceConfiguration, configKey)
+	}
+
+	//Add remaining keys to template vs updating values
+	// first clean out used values
+	for usedKey := range usedConfigKeys {
+		delete(resourceConfiguration, usedConfigKeys[usedKey])
+	}
+	log.Println("Entering Add Loop")
+	for configKey2 := range resourceConfiguration {
+		for dataKey := range keyList {
+			log.Printf("Add Loop: configKey2=[%s] keyList[%d] =[%v]", configKey2, dataKey, keyList[dataKey])
+			if strings.Contains(configKey2, keyList[dataKey]) {
+				splitArray := strings.Split(configKey2, keyList[dataKey]+".")
+				log.Printf("Add Loop Contains %+v", splitArray[1])
+				resourceItem := templateCatalogItem.Data[keyList[dataKey]].(map[string]interface{})
+				resourceItem = addTemplateValue(
+					resourceItem["data"].(map[string]interface{}),
+					splitArray[1],
+					resourceConfiguration[configKey2])
+			}
+		}
 	}
 	//update template with deployment level config
 	// limit to description and reasons as other things could get us into trouble
@@ -436,8 +496,14 @@ func deleteResource(d *schema.ResourceData, meta interface{}) error {
 	//Which will fetch and return the delete machine template from the given template
 	DestroyMachineTemplate, resourceTemplate, errDestroyAction := client.GetDestroyActionTemplate(templateResources)
 	if errDestroyAction != nil {
+		if errDestroyAction.Error() == "resource is not created or not found" {
+			d.SetId("")
+			return fmt.Errorf("possibly resource got deleted outside terraform")
+		}
+
 		return fmt.Errorf("Destory Machine action template failed to load: %v", errDestroyAction)
 	}
+
 	//Set a destroy machine REST call
 	_, errDestroyMachine := client.DestroyMachine(DestroyMachineTemplate, resourceTemplate)
 	//Raise an exception if error got while deleting resource
@@ -554,6 +620,14 @@ func (c *APIClient) RequestMachine(template *CatalogItemTemplate) (*RequestMachi
 
 	requestMachineRes := new(RequestMachineResponse)
 	apiError := new(APIError)
+
+	jsonBody, jErr := json.Marshal(template)
+	if jErr != nil {
+		log.Printf("Error marshalling template as JSON")
+		return nil, jErr
+	} else {
+		log.Printf("JSON Request Info: %s", jsonBody)
+	}
 	//Set a REST call to create a machine
 	_, err := c.HTTPClient.New().Post(path).BodyJSON(template).
 		Receive(requestMachineRes, apiError)
