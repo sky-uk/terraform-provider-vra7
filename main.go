@@ -3,7 +3,7 @@ package main
 import (
 	"github.com/hashicorp/terraform/plugin"
 	"github.com/hashicorp/terraform/terraform"
-	"./vrealize"
+	"github.com/sky-uk/terraform-provider-vra7/vrealize"
 )
 
 func main() {
